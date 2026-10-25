@@ -1,0 +1,181 @@
+# One Harbor Breeze fan, included from fans.yaml once per fan with these vars:
+#   fan_id:    short C++-safe name, e.g. living_room
+#   fan_name:  name shown in Home Assistant
+#   remote_id: the 33 ID elements its remote sends (1 = long); the log prints them
+#              ("Other remote: id ...") for any remote it doesn't know yet.
+
+globals:
+  # True while the entity is updated without transmitting (boot restore, the real remote).
+  - id: quiet_${fan_id}
+    type: bool
+    initial_value: "true"
+  # What the fan was last told, to work out what a state change needs to send.
+  - id: sent_on_${fan_id}
+    type: bool
+  - id: sent_speed_${fan_id}
+    type: int
+  - id: sent_reverse_${fan_id}
+    type: bool
+  - id: sent_breeze_${fan_id}
+    type: bool
+
+esphome:
+  on_boot:
+    - priority: -100
+      then:
+        # The state was restored during setup without sending anything; from here on, changes
+        # are transmitted. Also register with the receiver so the real remote updates this fan.
+        - lambda: |-
+            auto *f = id(fan_${fan_id});
+            id(sent_on_${fan_id}) = f->state;
+            id(sent_speed_${fan_id}) = f->speed;
+            id(sent_reverse_${fan_id}) = f->direction == fan::FanDirection::REVERSE;
+            id(sent_breeze_${fan_id}) = f->has_preset_mode();
+            id(quiet_${fan_id}) = false;
+            id(fan_links).push_back({"${remote_id}", [](int cmd) { id(heard_${fan_id}).execute(cmd); }});
+
+fan:
+  - platform: template
+    id: fan_${fan_id}
+    name: ${fan_name}
+    speed_count: 6
+    has_direction: true
+    preset_modes: [Breeze]
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_state:
+      - lambda: |-
+          auto *f = id(fan_${fan_id});
+          bool reverse = f->direction == fan::FanDirection::REVERSE;
+          bool breeze = f->has_preset_mode();
+          auto send = [](int cmd) { id(send_code).execute(std::string("${remote_id}"), cmd); };
+          if (!id(quiet_${fan_id})) {
+            if (f->state && f->speed < 1 && !breeze) {
+              // Turned on without a speed: use the last one (or 3) and come back here.
+              int s = id(sent_speed_${fan_id});
+              f->make_call().set_speed(s > 0 ? s : 3).perform();
+              return;
+            }
+            // Speed and Breeze buttons turn the fan on by themselves, so power (a toggle) is
+            // only sent to turn it off.
+            static const int SPEEDS[] = {0, 0x95A6, 0x65A6, 0xA5A6, 0x59A6, 0x99A6, 0x69A6};
+            if (!f->state) {
+              if (id(sent_on_${fan_id})) send(0x55A6);
+            } else if (breeze) {
+              if (!id(sent_breeze_${fan_id}) || !id(sent_on_${fan_id})) {
+                send(0xA9A6);
+                // Breeze switches the fan to the snowflake direction.
+                if (!reverse) {
+                  id(quiet_${fan_id}) = true;
+                  f->make_call().set_direction(fan::FanDirection::REVERSE).perform();
+                  id(quiet_${fan_id}) = false;
+                  reverse = true;
+                }
+              }
+            } else if (!id(sent_on_${fan_id}) || id(sent_breeze_${fan_id}) || f->speed != id(sent_speed_${fan_id})) {
+              send(SPEEDS[f->speed]);
+            }
+            if (reverse != id(sent_reverse_${fan_id}) && !(breeze && !id(sent_breeze_${fan_id}))) {
+              send(reverse ? 0x56A6 : 0x5666);
+            }
+          }
+          if (!f->state && id(timer_${fan_id}).is_running()) id(timer_${fan_id}).stop();
+          id(sent_on_${fan_id}) = f->state;
+          if (f->speed > 0) id(sent_speed_${fan_id}) = f->speed;
+          id(sent_reverse_${fan_id}) = reverse;
+          id(sent_breeze_${fan_id}) = breeze;
+
+script:
+  # A button press heard from this fan's real remote: update the entities without transmitting.
+  - id: heard_${fan_id}
+    mode: queued
+    parameters:
+      cmd: int
+    then:
+      - lambda: |-
+          auto *f = id(fan_${fan_id});
+          const char *name = nullptr;
+          id(quiet_${fan_id}) = true;
+          switch (cmd) {
+            case 0x55A6: name = "Fan power"; f->make_call().set_state(!f->state).perform(); break;
+            case 0x95A6: name = "Speed 1"; f->make_call().set_state(true).set_speed(1).perform(); break;
+            case 0x65A6: name = "Speed 2"; f->make_call().set_state(true).set_speed(2).perform(); break;
+            case 0xA5A6: name = "Speed 3"; f->make_call().set_state(true).set_speed(3).perform(); break;
+            case 0x59A6: name = "Speed 4"; f->make_call().set_state(true).set_speed(4).perform(); break;
+            case 0x99A6: name = "Speed 5"; f->make_call().set_state(true).set_speed(5).perform(); break;
+            case 0x69A6: name = "Speed 6"; f->make_call().set_state(true).set_speed(6).perform(); break;
+            case 0xA9A6:
+              name = "Breeze";
+              f->make_call().set_state(true).set_preset_mode("Breeze").set_direction(fan::FanDirection::REVERSE).perform();
+              break;
+            case 0x5666: name = "Direction sun"; f->make_call().set_direction(fan::FanDirection::FORWARD).perform(); break;
+            case 0x56A6: name = "Direction snowflake"; f->make_call().set_direction(fan::FanDirection::REVERSE).perform(); break;
+            case 0x9666: name = "Light"; break;
+            case 0xAA56: name = "Home"; break;
+            case 0xA6A6: name = "Clock"; break;
+            case 0x9656: name = "Timer 2h"; break;
+            case 0x6656: name = "Timer 4h"; break;
+            case 0xA656: name = "Timer 8h"; break;
+          }
+          id(quiet_${fan_id}) = false;
+          if (name == nullptr) {
+            ESP_LOGW("remote", "${fan_name}: unknown button 0x%04X", cmd);
+            return;
+          }
+          ESP_LOGI("remote", "${fan_name}: heard %s", name);
+          id(last_button_${fan_id}).publish_state(name);
+          if (cmd == 0x9656) id(timer_${fan_id}).execute(2);
+          if (cmd == 0x6656) id(timer_${fan_id}).execute(4);
+          if (cmd == 0xA656) id(timer_${fan_id}).execute(8);
+
+  # The fan's own timer turns it off without telling anyone; mirror it so the entity follows.
+  - id: timer_${fan_id}
+    mode: restart
+    parameters:
+      hours: int
+    then:
+      - delay: !lambda 'return hours * 3600000;'
+      - lambda: |-
+          id(quiet_${fan_id}) = true;
+          id(fan_${fan_id}).turn_off().perform();
+          id(quiet_${fan_id}) = false;
+
+button:
+  - platform: template
+    name: ${fan_name} Light
+    icon: mdi:lightbulb
+    on_press:
+      - script.execute: {id: send_code, remote: "${remote_id}", cmd: 0x9666}
+  - platform: template
+    name: ${fan_name} Home
+    icon: mdi:home
+    on_press:
+      - script.execute: {id: send_code, remote: "${remote_id}", cmd: 0xAA56}
+  - platform: template
+    name: ${fan_name} Clock
+    icon: mdi:clock-outline
+    on_press:
+      - script.execute: {id: send_code, remote: "${remote_id}", cmd: 0xA6A6}
+  - platform: template
+    name: ${fan_name} Timer 2h
+    icon: mdi:timer-outline
+    on_press:
+      - script.execute: {id: send_code, remote: "${remote_id}", cmd: 0x9656}
+      - script.execute: {id: "timer_${fan_id}", hours: 2}
+  - platform: template
+    name: ${fan_name} Timer 4h
+    icon: mdi:timer-outline
+    on_press:
+      - script.execute: {id: send_code, remote: "${remote_id}", cmd: 0x6656}
+      - script.execute: {id: "timer_${fan_id}", hours: 4}
+  - platform: template
+    name: ${fan_name} Timer 8h
+    icon: mdi:timer-outline
+    on_press:
+      - script.execute: {id: send_code, remote: "${remote_id}", cmd: 0xA656}
+      - script.execute: {id: "timer_${fan_id}", hours: 8}
+
+text_sensor:
+  - platform: template
+    id: last_button_${fan_id}
+    name: ${fan_name} Last remote button
+    icon: mdi:remote

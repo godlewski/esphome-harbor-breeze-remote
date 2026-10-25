@@ -1,0 +1,6 @@
+esphome/secrets.yaml
+esphome/my-fans.yaml
+esphome/.esphome/
+esphome/.gitignore
+.esphome/
+__pycache__/

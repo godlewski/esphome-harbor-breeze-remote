@@ -1,0 +1,132 @@
+# One fan: a tile (tap the icon to turn it on/off) and a button per remote speed plus Breeze.
+# Standard cards only. Replace fan.harbor_breeze_fans_fan_1 with your fan's entity ID
+# (Settings -> Devices & services -> ESPHome -> your device), and the button IDs likewise.
+#
+# The speed buttons use percentages because that's what Home Assistant's fan service takes. With 6
+# speeds HA rounds up to the next speed, so speed 1 is 16 % (17 % would already be speed 2).
+type: vertical-stack
+cards:
+  - type: tile
+    entity: fan.harbor_breeze_fans_fan_1
+    name: Ceiling fan
+    icon: mdi:ceiling-fan
+    color: cyan
+    tap_action:
+      action: more-info
+    icon_tap_action:
+      action: toggle
+  - type: grid
+    columns: 7
+    square: false
+    cards:
+      - &speed
+        type: button
+        name: "1"
+        icon: mdi:fan
+        show_state: false
+        tap_action:
+          action: perform-action
+          perform_action: fan.set_percentage
+          target:
+            entity_id: fan.harbor_breeze_fans_fan_1
+          data:
+            percentage: 16
+      - <<: *speed
+        name: "2"
+        tap_action:
+          action: perform-action
+          perform_action: fan.set_percentage
+          target:
+            entity_id: fan.harbor_breeze_fans_fan_1
+          data:
+            percentage: 33
+      - <<: *speed
+        name: "3"
+        tap_action:
+          action: perform-action
+          perform_action: fan.set_percentage
+          target:
+            entity_id: fan.harbor_breeze_fans_fan_1
+          data:
+            percentage: 50
+      - <<: *speed
+        name: "4"
+        tap_action:
+          action: perform-action
+          perform_action: fan.set_percentage
+          target:
+            entity_id: fan.harbor_breeze_fans_fan_1
+          data:
+            percentage: 66
+      - <<: *speed
+        name: "5"
+        tap_action:
+          action: perform-action
+          perform_action: fan.set_percentage
+          target:
+            entity_id: fan.harbor_breeze_fans_fan_1
+          data:
+            percentage: 83
+      - <<: *speed
+        name: "6"
+        tap_action:
+          action: perform-action
+          perform_action: fan.set_percentage
+          target:
+            entity_id: fan.harbor_breeze_fans_fan_1
+          data:
+            percentage: 100
+      - <<: *speed
+        name: Breeze
+        icon: mdi:weather-windy
+        tap_action:
+          action: perform-action
+          perform_action: fan.set_preset_mode
+          target:
+            entity_id: fan.harbor_breeze_fans_fan_1
+          data:
+            preset_mode: Breeze
+  - type: grid
+    columns: 4
+    square: false
+    cards:
+      - type: button
+        entity: button.harbor_breeze_fans_fan_1_light
+        name: Light
+        icon: mdi:lightbulb
+        show_state: false
+        tap_action:
+          action: perform-action
+          perform_action: button.press
+          target:
+            entity_id: button.harbor_breeze_fans_fan_1_light
+      - type: button
+        entity: button.harbor_breeze_fans_fan_1_timer_2h
+        name: 2 h
+        icon: mdi:timer-outline
+        show_state: false
+        tap_action:
+          action: perform-action
+          perform_action: button.press
+          target:
+            entity_id: button.harbor_breeze_fans_fan_1_timer_2h
+      - type: button
+        entity: button.harbor_breeze_fans_fan_1_timer_4h
+        name: 4 h
+        icon: mdi:timer-outline
+        show_state: false
+        tap_action:
+          action: perform-action
+          perform_action: button.press
+          target:
+            entity_id: button.harbor_breeze_fans_fan_1_timer_4h
+      - type: button
+        entity: button.harbor_breeze_fans_fan_1_timer_8h
+        name: 8 h
+        icon: mdi:timer-outline
+        show_state: false
+        tap_action:
+          action: perform-action
+          perform_action: button.press
+          target:
+            entity_id: button.harbor_breeze_fans_fan_1_timer_8h

@@ -1,0 +1,224 @@
+# Harbor Breeze fan bridge: the shared part (radio, transmitter, receiver). Don't flash this file
+# directly; include it from fans.yaml (or your own copy), which also lists your fans.
+#
+# Remote frame (docs/PROTOCOL.md): 49 elements, alternating carrier-on / carrier-off, starting and
+# ending with carrier on. Each element is short (on 478 / off 441 us) or long (on 925 / off 888 us),
+# and pulses and gaps vary independently. The first 33 elements are the remote's ID (they change
+# with the 0/1 switch in the battery compartment); the last 16 are the button. Then an ~10 ms gap;
+# each press repeats the frame 6 times.
+#
+# Wiring (CC1101 pin -> ESP32): 1 GND->GND, 2 VCC->3V3, 3 GDO0->GPIO32, 4 CSN->GPIO5,
+# 5 SCK->GPIO18, 6 MOSI->GPIO23, 7 MISO->GPIO19, 8 GDO2->GPIO33.
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  on_boot:
+    - priority: -100
+      then:
+        # A restored TX frequency doesn't run its set_action; apply it here.
+        - cc1101.set_frequency: !lambda 'return id(tx_freq).state * 1000.0f;'
+        # set_frequency leaves the radio receiving; go idle if listening is off.
+        - if:
+            condition:
+              switch.is_off: rx_listen
+            then:
+              - cc1101.set_idle
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+
+api:
+  encryption:
+    key: !secret fans_api_key
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Harbor Fans Fallback"
+    password: !secret fans_ap_password
+
+spi:
+  clk_pin: GPIO18
+  mosi_pin: GPIO23
+  miso_pin: GPIO19
+
+cc1101:
+  cs_pin: GPIO5
+  frequency: 314.98MHz   # the remote measured ~20 kHz below 315 with an RTL-SDR
+  modulation_type: ASK/OOK
+
+# Two-pin mode only: with `gdo0_pin` set (single-pin mode) no data reached the radio.
+remote_transmitter:
+  pin: GPIO32          # GDO0
+  carrier_duty_percent: 100%
+  on_transmit:
+    then:
+      - cc1101.begin_tx
+  on_complete:
+    then:
+      - if:
+          condition:
+            switch.is_on: rx_listen
+          then:
+            - cc1101.begin_rx
+          else:
+            - cc1101.set_idle
+
+remote_receiver:
+  pin: GPIO33          # GDO2
+  filter: 100us        # drop the radio's noise spikes
+  idle: 8ms            # a gap this long ends one frame
+  on_raw:
+    then:
+      - lambda: |-
+          if (id(log_raw).state && x.size() >= 20) {
+            std::string s;
+            for (auto v : x) { s += to_string(v); s += ","; }
+            ESP_LOGI("raw", "%u: %s", (unsigned) x.size(), s.c_str());
+          }
+          // 49 elements plus the closing idle gap.
+          if (x.size() != 50) return;
+          char heard_id[34] = {0};
+          int cmd = 0;
+          for (int i = 0; i < 49; i++) {
+            if ((i % 2 == 0) != (x[i] > 0)) return;
+            bool longer = (i % 2 == 0) ? (x[i] > 700) : (-x[i] > 665);
+            if (i < 33) heard_id[i] = longer ? '1' : '0';
+            else cmd = (cmd << 1) | (longer ? 1 : 0);
+          }
+          // Each press repeats the frame 6 times; act once.
+          static std::string last_id;
+          static int last_cmd = -1;
+          static uint32_t last_ms = 0;
+          uint32_t now = millis();
+          bool repeat = cmd == last_cmd && last_id == heard_id && now - last_ms < 500;
+          last_ms = now;
+          if (repeat) return;
+          last_id = heard_id;
+          last_cmd = cmd;
+          for (auto &link : id(fan_links)) {
+            if (link.first == heard_id) {
+              link.second(cmd);
+              return;
+            }
+          }
+          ESP_LOGI("remote", "Other remote: id %s button 0x%04X", heard_id, cmd);
+
+globals:
+  # (remote ID, handler) for each fan; filled in by fan.yaml at boot.
+  - id: fan_links
+    type: std::vector<std::pair<std::string, std::function<void(int)>>>
+
+script:
+  - id: send_code
+    mode: queued
+    max_runs: 10
+    parameters:
+      remote: string
+      cmd: int
+    then:
+      - logger.log:
+          format: "Sending %s 0x%04X"
+          args: [remote.c_str(), cmd]
+      # The fan's receiver dozes when idle and misses the first press; a short unmodulated carrier
+      # wakes it without counting as a button press.
+      - if:
+          condition:
+            lambda: 'return id(tx_wake).state > 0;'
+          then:
+            - remote_transmitter.transmit_raw:
+                # Split into 25 ms pieces (an RMT symbol holds at most ~32 ms).
+                code: !lambda |-
+                  std::vector<int32_t> v;
+                  for (int32_t left = (int32_t) id(tx_wake).state * 1000; left > 0; left -= 25000)
+                    v.push_back(std::min<int32_t>(left, 25000));
+                  v.push_back(-10000);
+                  return v;
+      - remote_transmitter.transmit_raw:
+          # remote = the 33 ID elements; cmd = the 16 button elements, first in the top bit; 1 = long.
+          code: !lambda |-
+            const char *id_bits = remote.c_str();
+            std::vector<int32_t> v;
+            auto add = [&v](bool on, bool longer) {
+              int32_t t = on ? (longer ? 925 : 478) : (longer ? 888 : 441);
+              v.push_back(on ? t : -t);
+            };
+            int n = 0;
+            for (const char *p = id_bits; *p; p++, n++) add(n % 2 == 0, *p == '1');
+            for (int i = 15; i >= 0; i--, n++) add(n % 2 == 0, (cmd >> i) & 1);
+            v.push_back(-10000);
+            return v;
+          repeat:
+            times: !lambda 'return (uint32_t) id(tx_repeats).state;'
+            wait_time: 0ms
+
+sensor:
+  - platform: wifi_signal
+    name: Wi-Fi signal
+    update_interval: 60s
+
+# While receiving, the CC1101 leaks enough near 315 MHz to deafen a fan receiver right next
+# to it. With this off the radio idles between transmissions (and won't hear the real remote).
+switch:
+  - platform: template
+    id: rx_listen
+    name: Listen for remote
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+    turn_on_action:
+      - cc1101.begin_rx
+    turn_off_action:
+      - cc1101.set_idle
+  # For mapping another remote: log the timings of everything the radio hears (docs/PROTOCOL.md).
+  - platform: template
+    id: log_raw
+    name: Log raw frames
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    entity_category: diagnostic
+
+# Transmit tuning.
+number:
+  - platform: template
+    id: tx_freq
+    name: TX frequency kHz
+    optimistic: true
+    min_value: 314000
+    max_value: 316000
+    step: 10
+    initial_value: 314980
+    restore_value: true
+    entity_category: config
+    set_action:
+      - cc1101.set_frequency: !lambda 'return x * 1000.0f;'
+  - platform: template
+    id: tx_wake
+    name: TX wake carrier ms
+    optimistic: true
+    min_value: 0
+    max_value: 1000
+    step: 50
+    initial_value: 300
+    restore_value: true
+    entity_category: config
+  - platform: template
+    id: tx_repeats
+    name: TX repeats
+    optimistic: true
+    min_value: 1
+    max_value: 30
+    step: 1
+    initial_value: 6
+    restore_value: true
+    entity_category: config
